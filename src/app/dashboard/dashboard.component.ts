@@ -1,8 +1,10 @@
 import { CommonModule } from '@angular/common';
 import { ChangeDetectorRef, Component, NgZone, OnInit } from '@angular/core';
 import { Router } from '@angular/router';
-import axios from 'axios';
+import { AuthService } from '../auth/auth.service';
+import { ERROR_MESSAGES, Task, User } from '../models';
 import { formatTaskLabel } from '../utils/legacy-format';
+import { TasksService } from './tasks.service';
 
 const STATUS_LABELS: Record<string, string> = {
   TODO: 'Por hacer',
@@ -20,51 +22,48 @@ const STATUS_LABELS: Record<string, string> = {
   styleUrl: './dashboard.component.css'
 })
 export class DashboardComponent implements OnInit {
-  tasks: any[] = [];
-  visibleTasks: any[] = [];
-  user: any = {};
-  loading: any = true;
-  error: any = '';
+  tasks: Task[] = [];
+  visibleTasks: Task[] = [];
+  user: User = {};
+  loading = true;
+  error = '';
 
-  constructor(private router: Router, private cdr: ChangeDetectorRef, private zone: NgZone) {}
+  constructor(
+    private router: Router,
+    private cdr: ChangeDetectorRef,
+    private zone: NgZone,
+    private auth: AuthService,
+    private taskSource: TasksService
+  ) {}
 
-  statusLabel(status: string): string {
-    return STATUS_LABELS[(status || '').toUpperCase()] || status;
+  statusLabel(status: string | undefined): string {
+    return STATUS_LABELS[(status || '').toUpperCase()] || status || '';
   }
 
   async ngOnInit(): Promise<void> {
-    const token = localStorage.getItem('workshop_token');
-    this.user = JSON.parse(localStorage.getItem('workshop_user') || '{}');
-    if (!token) {
-      await this.router.navigate(['/login']);
-      return;
-    }
     try {
-      const response: any = await axios.get('http://localhost:8000/api/tasks?owner=' + (this.user.username || ''), {
-        headers: { Authorization: 'Bearer ' + token }
-      });
-      const tasks = response.data;
-      const tmp: any[] = [];
-      for (let i = 0; i < tasks.length; i++) {
-        if (tasks[i].status !== 'ARCHIVED') {
-          tasks[i].label = formatTaskLabel(tasks[i]);
-          tmp.push(tasks[i]);
-        }
+      const result = await this.taskSource.load();
+      if (result.ok === false) {
+        this.error = ERROR_MESSAGES[result.error];
+        if (result.error === 'no-session') await this.router.navigate(['/login']);
+        return;
       }
-      tmp.sort((a: any, b: any) => a.priority > b.priority ? -1 : 1);
-      // axios resuelve a veces fuera de la zona de Angular (más aún llegando
-      // por navegación desde el login): forzamos volver a entrar a la zona
-      // y disparamos detectChanges a mano para no depender de que Angular
-      // lo detecte solo.
-      this.zone.run(() => {
-        this.tasks = tasks;
-        this.visibleTasks = tmp;
-        this.loading = false;
-        this.cdr.detectChanges();
+      const { tasks, user } = result.value;
+      const visibleTasks = tasks.filter(task => task.status !== 'ARCHIVED');
+      for (const task of visibleTasks) task.label = formatTaskLabel(task);
+      visibleTasks.sort((first, second) => {
+        if (first.priority === undefined || second.priority === undefined) return 1;
+        return first.priority > second.priority ? -1 : 1;
       });
-    } catch (error: any) {
       this.zone.run(() => {
-        this.error = error?.response?.data?.detail || error?.message || 'No se pudo cargar el dashboard';
+        this.user = user;
+        this.tasks = tasks;
+        this.visibleTasks = visibleTasks;
+      });
+    } catch {
+      this.error = ERROR_MESSAGES.navigation;
+    } finally {
+      this.zone.run(() => {
         this.loading = false;
         this.cdr.detectChanges();
       });
@@ -72,8 +71,15 @@ export class DashboardComponent implements OnInit {
   }
 
   async logout(): Promise<void> {
-    localStorage.removeItem('workshop_token');
-    localStorage.removeItem('workshop_user');
-    await this.router.navigate(['/login']);
+    const result = this.auth.logout();
+    if (result.ok === false) {
+      this.error = ERROR_MESSAGES[result.error];
+      return;
+    }
+    try {
+      await this.router.navigate(['/login']);
+    } catch {
+      this.error = ERROR_MESSAGES.navigation;
+    }
   }
 }
